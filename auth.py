@@ -145,17 +145,18 @@ def run_oauth_flow() -> dict:
     auth_url = f"{config.AUTH_URL}?{urlencode(params)}"
 
     server = _start_callback_server()
+    print(f"\nOpening browser for LinkedIn login...\nIf the browser does not open, visit this URL manually:\n\n  {auth_url}\n", flush=True)
     webbrowser.open(auth_url)
 
-    # Wait up to 120 seconds for the callback
-    deadline = time.time() + 120
+    # Wait up to 300 seconds for the callback
+    deadline = time.time() + 300
     while time.time() < deadline:
         if _auth_result.get("code") or _auth_result.get("error"):
             break
         time.sleep(0.2)
     else:
         server.shutdown()
-        raise TimeoutError("OAuth flow timed out waiting for browser callback.")
+        raise TimeoutError("OAuth flow timed out (5 min). Re-run linkedin_authenticate.")
 
     server.shutdown()
 
