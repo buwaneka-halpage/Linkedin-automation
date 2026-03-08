@@ -10,6 +10,7 @@ Tools exposed:
   - linkedin_get_my_posts        : Retrieve your own posts (Voyager API)
   - linkedin_search_jobs         : Search jobs with real results (Voyager API)
   - linkedin_job_search_url      : Build a job search URL (no credentials needed)
+  - linkedin_score_jobs          : Search jobs and score each against your profile (Claude)
 
 Run with:
   uv run server.py
@@ -18,6 +19,7 @@ Run with:
 from mcp.server.fastmcp import FastMCP
 
 import auth
+import job_scorer
 import linkedin_api
 from token_store import token_status
 
@@ -274,6 +276,54 @@ def linkedin_job_search_url(
         job_type=job_type,
         date_posted=date_posted,
     )
+
+
+@mcp.tool()
+def linkedin_score_jobs(
+    keywords: str,
+    location: str = "",
+    remote: bool = False,
+    job_type: str = "",
+    experience: str = "",
+    count: int = 10,
+) -> dict:
+    """
+    Search LinkedIn jobs and score each one against your profile using Claude.
+
+    Combines your LinkedIn profile with profile.txt (if present) to build
+    a scoring context, then asks Claude to rate each job 1–10 with a fit
+    summary and skill gap notes. Results are sorted best-first.
+
+    Requires LINKEDIN_EMAIL + LINKEDIN_PASSWORD (Voyager) and ANTHROPIC_API_KEY.
+    Add your CV / skills to profile.txt in the project root for richer scoring.
+
+    Args:
+        keywords:   Role title or skills, e.g. "Senior Python Engineer AI".
+        location:   City or country. Leave blank for worldwide.
+        remote:     True to filter for remote-only roles.
+        job_type:   One of: FULL_TIME, PART_TIME, CONTRACT, TEMPORARY, INTERNSHIP.
+        experience: "1" internship, "2" entry, "3" associate,
+                    "4" mid-senior, "5" director, "6" executive.
+        count:      Number of jobs to fetch and score (1–50, default 10).
+
+    Returns:
+        keywords, location, returned, scored (bool), jobs[] — each with
+        job_id, title, company, location, job_url, applies,
+        score (1–10), fit (sentence), gaps (string).
+    """
+    if not keywords:
+        return {"error": "keywords is required."}
+    try:
+        return job_scorer.score_jobs(
+            keywords=keywords,
+            location=location,
+            remote=remote,
+            job_type=job_type,
+            experience=experience,
+            count=count,
+        )
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,32 @@
+# profile.txt — Your CV / Skills for Job Scoring (Module 4)
+#
+# Copy this file to profile.txt and fill in your details.
+# Claude reads this when scoring job listings via linkedin_score_jobs.
+# Lines starting with # are ignored.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ROLE: Senior Software Engineer
+
+SKILLS:
+- Python (5 years): FastAPI, Django, asyncio, data pipelines
+- JavaScript/TypeScript: React, Node.js
+- Cloud: AWS (EC2, Lambda, S3, RDS), Docker, Kubernetes
+- Databases: PostgreSQL, Redis, MongoDB
+- Testing: pytest, Jest, CI/CD with GitHub Actions
+
+EXPERIENCE:
+- 5 years total in backend/full-stack engineering
+- Built and maintained microservices serving 1M+ requests/day
+- Led a team of 3 engineers on a payments platform
+
+PREFERENCES:
+- Prefer remote or hybrid roles
+- Interested in AI/ML adjacent products
+- Looking for senior or staff-level positions
+- Prefer startups or scale-ups (Series A–C)
+- Not interested in: finance, defence, gambling
+
+EDUCATION:
+- BSc Computer Science, University of X (2019)
+
+NOTICE PERIOD: 1 month

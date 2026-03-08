@@ -1,6 +1,8 @@
 .env
 tokens.json
 posts.json
+outreach_log.json
+profile.txt
 .venv/
 __pycache__/
 *.pyc
