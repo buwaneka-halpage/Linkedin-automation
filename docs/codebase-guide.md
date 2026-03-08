@@ -11,23 +11,31 @@ Claude Desktop  (chat UI)
       |
       |  MCP protocol (JSON-RPC over stdio)
       v
-server.py                  <- public interface, 8 MCP tools
+server.py                  <- public interface, 9 MCP tools
       |
       |---> auth.py             <- OAuth 2.0 flow + token refresh
       |          |
       |---> linkedin_api.py     <- routes requests to right backend
       |          |
       |          |---> httpx (official REST API) -- for posting
-      |          |---> voyager.py               -- for reading + jobs
+      |          |---> voyager.py               -- for reading + jobs + outreach
       |          |---> posts_store.py            -- local fallback
+      |
+      |---> job_scorer.py       <- Module 4: Gemini job scoring (also used by MCP tool)
       |
       token_store.py        <- read/write tokens.json (OAuth)
       config.py             <- loads .env
+      llm.py                <- thin Gemini wrapper (all LLM calls)
+
+Standalone scripts (triggered by OS scheduler / Task Scheduler):
+  scheduler.py   <- Module 2: generate post with Gemini, publish, exit
+  outreach.py    <- Module 3: search + connect people via Voyager, rate-limited 5/day
+  job_scorer.py  <- Module 4: also runnable as CLI (py -3 job_scorer.py --keywords "...")
 ```
 
 **Two authentication tracks run in parallel:**
 - **OAuth 2.0** (Client ID + Secret) — used by `auth.py` for creating posts and fetching profile
-- **Voyager API** (Email + Password) — used by `voyager.py` for reading posts and searching jobs
+- **Voyager API** (Email + Password) — used by `voyager.py` for reading posts, searching jobs, and sending connection requests
 
 LinkedIn removed the `r_member_social` (read posts) scope from the free OAuth tier, which is why two separate auth methods are needed.
 
@@ -42,6 +50,39 @@ Loads `CLIENT_ID`, `CLIENT_SECRET`, `REDIRECT_PORT` from `.env` using `python-do
 **Why it exists:** every other file needs these values. Centralising them means you only change one file when switching environments.
 
 **Key concept — environment variables:** instead of hardcoding secrets in source code (which would get committed to git), `os.environ.get()` reads from the OS or a `.env` file at runtime. The `.env` file is gitignored so secrets never reach the repo.
+
+---
+
+### `llm.py` — The LLM Provider Wrapper
+
+A single function: `llm.generate(prompt, max_tokens=1024) -> str`.
+
+All three standalone modules (`scheduler.py`, `outreach.py`, `job_scorer.py`) import this instead of talking to Gemini directly:
+
+```python
+# Every module calls this — not the Gemini SDK directly
+import llm
+
+text = llm.generate("Write a LinkedIn post about Python...", max_tokens=512)
+```
+
+**Why it exists:** it's the **single point of change** for the LLM provider. To switch from Gemini to any other model (Ollama, OpenAI, Mistral), you edit only `llm.py`. The three module files are completely unaffected.
+
+**Key concept — provider abstraction:** the modules don't care *which* model generates the text, only that `generate(prompt)` returns a string. This is the same idea as a database driver — your app calls `db.query()`, the driver translates that to MySQL or PostgreSQL. `llm.py` is the driver.
+
+**Under the hood:**
+```python
+from google import genai
+
+response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents=prompt,
+    config=types.GenerateContentConfig(max_output_tokens=max_tokens),
+)
+return response.text.strip()
+```
+
+Uses `gemini-2.5-flash` — Google's free-tier model that balances quality and speed for short text tasks like post generation and connection notes. Reads `GEMINI_API_KEY` from `.env`.
 
 ---
 
@@ -218,6 +259,65 @@ The `@mcp.tool()` decorator registers the function. **Good docstrings = Claude p
 
 ---
 
+### `scheduler.py` — Module 2: Automated Post Publishing
+
+A **run-once** script: generates a LinkedIn post with Gemini and publishes it, then exits. No long-running process — the OS scheduler (Windows Task Scheduler or cron) calls it at the right time.
+
+```python
+# The entire entry point
+if __name__ == "__main__":
+    generate_and_publish()
+```
+
+**Why run-once instead of a long-running loop?** The `schedule` library keeps a Python process alive 24/7 just to wait. Task Scheduler already does that job at the OS level — it's more efficient, survives reboots, and runs whether or not any other Python process is running.
+
+**Configuring:** `POST_TOPIC` in `.env` controls what Gemini writes about. Changing this is the only thing needed to shift the content strategy.
+
+**Register with Windows Task Scheduler:**
+```
+schtasks /create /tn "LinkedIn Daily Post" /tr "\"path\to\.venv\Scripts\python.exe\" \"path\to\scheduler.py\"" /sc daily /st 09:00 /f
+```
+
+---
+
+### `outreach.py` — Module 3: Connection Outreach
+
+Searches LinkedIn for people matching `OUTREACH_KEYWORDS`, generates a personalised 300-character note for each via `llm.generate()`, then calls `api.add_connection(public_id, message=note)`.
+
+**Rate limiting and deduplication:**
+```python
+# outreach_log.json tracks:
+# - every person contacted (by public_id)
+# - how many requests went out today
+# - the date of last reset (resets daily)
+```
+
+The log file means the script is safe to run on a schedule — it will never contact the same person twice, and it stops at `OUTREACH_DAILY_LIMIT` (default 5) per calendar day.
+
+**Note generation:** `llm.generate()` is called once per person with their name + headline. The result is truncated to 300 characters (LinkedIn's hard limit for connection notes).
+
+**Uses Voyager**, not the official API — `api.add_connection()` from the `linkedin-api` package. This reuses the same authenticated Voyager session as post reading and job search.
+
+---
+
+### `job_scorer.py` — Module 4: Job Scoring
+
+Fetches jobs via `linkedin_api.search_jobs()`, builds a profile context from the LinkedIn API + `profile.txt`, then asks Gemini to return a JSON array of scores.
+
+**Used in two ways:**
+1. As a library — imported by the `linkedin_score_jobs` MCP tool in `server.py`
+2. As a CLI — `py -3 job_scorer.py --keywords "Python Engineer" --location "London"`
+
+**Profile context priority:** LinkedIn profile (name, headline) is fetched via OAuth; `profile.txt` adds skills, experience, and preferences. Both are concatenated and passed to Gemini as the scoring baseline.
+
+**Gemini JSON parsing:** Gemini sometimes wraps JSON in markdown code fences (` ```json ... ``` `). The parser strips these before calling `json.loads()`:
+```python
+clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+```
+This is a common defensive pattern when asking any LLM to return structured data.
+
+---
+
 ## Data Flow: Creating a Post
 
 ```
@@ -331,8 +431,11 @@ Claude Desktop: "Authenticated successfully as Buwaneka Halpage."
 | `{**a, **b}` dict unpacking | `auth.py` | Merges two dicts; right-side keys win on conflict |
 | `resp.raise_for_status()` | `linkedin_api.py` | Throws immediately on HTTP 4xx/5xx; prevents silent failures |
 | `time.time()` | `token_store.py` | Unix timestamp (seconds since 1970); comparable across restarts |
-| `global _client` + lazy init | `voyager.py` | Module-level cache — creates expensive object once, reuses it |
+| `global _client` + lazy init | `voyager.py`, `llm.py` | Module-level cache — creates expensive object once, reuses it |
 | `try/except RuntimeError` | `linkedin_api.py` | Graceful degradation — falls back to simpler path if credentials missing |
+| Provider abstraction | `llm.py` | Single wrapper around Gemini; swap providers by changing one file |
+| `str.removeprefix/removesuffix` | `job_scorer.py` | Strip markdown fences from LLM JSON responses (Python 3.9+) |
+| Run-once script pattern | `scheduler.py`, `outreach.py` | Script does its job and exits; OS scheduler handles timing |
 
 ---
 
@@ -343,6 +446,9 @@ Claude Desktop: "Authenticated successfully as Buwaneka Halpage."
 2. Add a `@mcp.tool()` wrapper in `server.py` with a clear docstring
 3. Restart Claude Desktop — FastMCP registers it automatically
 
+**Swap the LLM provider:**
+Only `llm.py` needs to change. Replace the `google-genai` client with any other provider (Ollama, OpenAI, Mistral). The `generate(prompt, max_tokens)` signature stays the same — `scheduler.py`, `outreach.py`, and `job_scorer.py` are untouched.
+
 **Swap the token storage backend:**
 Only `token_store.py` needs to change. The four function signatures stay the same, but the implementation could use OS keychain, a database, or encrypted storage. Nothing else in the codebase changes.
 
@@ -352,4 +458,4 @@ Only `token_store.py` needs to change. The four function signatures stay the sam
 3. Delete `tokens.json` and re-run `linkedin_authenticate` — the user will consent to the new scope
 
 **Add more Voyager features:**
-`voyager.py` is the right place. The `linkedin-api` package also exposes: `get_feed_posts()`, `get_post_comments()`, `react_to_post()`, `send_message()`, `add_connection()`, `search_people()`. Add a wrapper function in `voyager.py`, route it in `linkedin_api.py`, expose it as a tool in `server.py`.
+`voyager.py` is the right place. The `linkedin-api` package also exposes: `get_feed_posts()`, `get_post_comments()`, `react_to_post()`, `send_message()`. Add a wrapper function in `voyager.py`, route it in `linkedin_api.py`, expose it as a tool in `server.py`.
