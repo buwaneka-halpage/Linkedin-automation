@@ -2,12 +2,13 @@
 LinkedIn MCP Server for Claude Desktop.
 
 Tools exposed:
-  - linkedin_authenticate      : Start OAuth 2.0 flow (run once)
-  - linkedin_token_status      : Check if authenticated and token expiry
-  - linkedin_get_profile       : Fetch your LinkedIn profile
-  - linkedin_create_post       : Publish a text post
+  - linkedin_authenticate        : Start OAuth 2.0 flow (run once)
+  - linkedin_token_status        : Check if authenticated and token expiry
+  - linkedin_get_profile         : Fetch your LinkedIn profile
+  - linkedin_create_post         : Publish a text post
   - linkedin_create_article_post : Publish a post with article/URL preview
-  - linkedin_job_search_url    : Build a job search URL with filters
+  - linkedin_get_my_posts        : Retrieve your own posts
+  - linkedin_job_search_url      : Build a job search URL with filters
 
 Run with:
   uv run server.py
@@ -156,6 +157,37 @@ def linkedin_create_article_post(
             description=description.strip(),
             visibility=visibility,
         )
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# My posts
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def linkedin_get_my_posts(count: int = 10) -> dict:
+    """
+    Retrieve your own LinkedIn posts — text, articles, and their metadata.
+
+    Args:
+        count: How many posts to return (1–50, default 10).
+
+    Returns:
+        total      — total posts on record
+        returned   — number in this response
+        posts[]    — list of posts, each with:
+                       post_id, post_url, text (first 300 chars),
+                       type (NONE=text / ARTICLE), article_url,
+                       created (UTC timestamp), visibility, state
+
+    Note:
+        Requires r_member_social scope. If you see a scope error,
+        go to developer.linkedin.com and add the 'Share on LinkedIn'
+        product to your app, then re-authenticate.
+    """
+    try:
+        return linkedin_api.get_my_posts(count)
     except Exception as e:
         return {"error": str(e)}
 
