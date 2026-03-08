@@ -1,5 +1,6 @@
 .env
 tokens.json
+posts.json
 .venv/
 __pycache__/
 *.pyc

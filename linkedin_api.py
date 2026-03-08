@@ -9,6 +9,7 @@ import time
 import httpx
 
 import config
+import posts_store
 from auth import get_valid_token
 from token_store import load_tokens, save_tokens
 
@@ -105,11 +106,15 @@ def create_text_post(text: str, visibility: str = "PUBLIC") -> dict:
     resp.raise_for_status()
 
     post_id = resp.headers.get("x-restli-id", "")
-    return {
+    result = {
         "post_id": post_id,
         "post_url": f"https://www.linkedin.com/feed/update/{post_id}/",
+        "text": text,
+        "type": "NONE",
         "visibility": visibility,
     }
+    posts_store.save_post(result)
+    return result
 
 
 def create_article_post(
@@ -159,12 +164,17 @@ def create_article_post(
     resp.raise_for_status()
 
     post_id = resp.headers.get("x-restli-id", "")
-    return {
+    result = {
         "post_id": post_id,
         "post_url": f"https://www.linkedin.com/feed/update/{post_id}/",
+        "text": text,
+        "type": "ARTICLE",
+        "article_url": url,
         "visibility": visibility,
         "shared_url": url,
     }
+    posts_store.save_post(result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -173,75 +183,20 @@ def create_article_post(
 
 def get_my_posts(count: int = 10) -> dict:
     """
-    Retrieve the authenticated member's own UGC posts.
+    Retrieve posts created through this tool from local store (posts.json).
 
-    Uses GET /v2/ugcPosts?q=authors with the cached person URN.
-    Requires r_member_social scope. If missing, returns a clear error
-    with instructions to add the scope to the LinkedIn app.
+    LinkedIn's consumer API does not provide r_member_social scope, so posts
+    are tracked locally on creation. Posts made outside this tool (LinkedIn
+    web, mobile) are not included.
 
     Args:
         count: Number of posts to return (1–50).
     """
-    author = _get_person_urn()
-    params = {
-        "q": "authors",
-        "authors": f"List({author})",
-        "count": min(max(count, 1), 50),
-        "sortBy": "LAST_MODIFIED",
-    }
-
-    resp = httpx.get(
-        f"{config.API_BASE}/v2/ugcPosts",
-        headers=_headers(),
-        params=params,
-    )
-
-    if resp.status_code == 403:
-        return {
-            "error": "Missing r_member_social scope.",
-            "fix": (
-                "Go to developer.linkedin.com → your app → Products → "
-                "add 'Share on LinkedIn' (which includes r_member_social), "
-                "then re-run linkedin_authenticate."
-            ),
-        }
-
-    resp.raise_for_status()
-    data = resp.json()
-
-    posts = []
-    for item in data.get("elements", []):
-        content = item.get("specificContent", {}).get("com.linkedin.ugc.ShareContent", {})
-        text = content.get("shareCommentary", {}).get("text", "")
-        media_category = content.get("shareMediaCategory", "NONE")
-
-        # Extract article URL if present
-        article_url = ""
-        media = content.get("media", [])
-        if media:
-            article_url = media[0].get("originalUrl", "")
-
-        post_id = item.get("id", "")
-        created_ms = item.get("created", {}).get("time", 0)
-        created_iso = ""
-        if created_ms:
-            import datetime
-            created_iso = datetime.datetime.utcfromtimestamp(created_ms / 1000).strftime("%Y-%m-%d %H:%M UTC")
-
-        posts.append({
-            "post_id": post_id,
-            "post_url": f"https://www.linkedin.com/feed/update/{post_id}/",
-            "text": text[:300] + ("..." if len(text) > 300 else ""),
-            "type": media_category,
-            "article_url": article_url,
-            "created": created_iso,
-            "visibility": item.get("visibility", {}).get("com.linkedin.ugc.MemberNetworkVisibility", ""),
-            "state": item.get("lifecycleState", ""),
-        })
-
+    posts = posts_store.load_posts(min(max(count, 1), 50))
     return {
-        "total": data.get("paging", {}).get("total", len(posts)),
+        "total": posts_store.post_count(),
         "returned": len(posts),
+        "source": "local store (posts.json)",
         "posts": posts,
     }
 
