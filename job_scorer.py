@@ -1,8 +1,8 @@
 """
-Module 4: Job search with Claude scoring.
+Module 4: Job search with Gemini scoring.
 
 Searches LinkedIn jobs via the Voyager API, combines your LinkedIn profile
-with an optional profile.txt file, then asks Claude to score each job 1–10
+with an optional profile.txt file, then asks Gemini to score each job 1–10
 with a fit summary and skill gap notes.
 
 Used directly by the linkedin_score_jobs MCP tool in server.py.
@@ -14,7 +14,7 @@ import json
 import logging
 import os
 
-from anthropic import Anthropic
+import llm
 from dotenv import load_dotenv
 
 import linkedin_api
@@ -69,7 +69,7 @@ def _build_profile_context() -> str:
 
 def _score_jobs(jobs: list[dict], profile_context: str) -> list[dict]:
     """
-    Send jobs + profile to Claude; return the same job list with
+    Send jobs + profile to Gemini; return the same job list with
     score, fit, and gaps fields added and sorted best-first.
     """
     jobs_text = "\n\n".join(
@@ -79,32 +79,26 @@ def _score_jobs(jobs: list[dict], profile_context: str) -> list[dict]:
         for i, j in enumerate(jobs)
     )
 
-    client = Anthropic()
-    message = client.messages.create(
-        model="claude-opus-4-6",
+    raw = llm.generate(
+        "Score these LinkedIn job listings against the candidate profile.\n\n"
+        f"CANDIDATE PROFILE:\n{profile_context}\n\n"
+        f"JOBS:\n{jobs_text}\n\n"
+        "For each job return:\n"
+        "  score  — integer 1–10 (10 = perfect fit)\n"
+        "  fit    — one sentence on why it is a good or poor fit\n"
+        "  gaps   — skills or experience the candidate is missing (empty string if none)\n\n"
+        "Return a JSON array only, no other text:\n"
+        '[{"job_index": 1, "score": 8, "fit": "...", "gaps": "..."}]',
         max_tokens=2048,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    "Score these LinkedIn job listings against the candidate profile.\n\n"
-                    f"CANDIDATE PROFILE:\n{profile_context}\n\n"
-                    f"JOBS:\n{jobs_text}\n\n"
-                    "For each job return:\n"
-                    "  score  — integer 1–10 (10 = perfect fit)\n"
-                    "  fit    — one sentence on why it is a good or poor fit\n"
-                    "  gaps   — skills or experience the candidate is missing (empty string if none)\n\n"
-                    "Return a JSON array only, no other text:\n"
-                    '[{"job_index": 1, "score": 8, "fit": "...", "gaps": "..."}]'
-                ),
-            }
-        ],
     )
 
+    # Gemini sometimes wraps JSON in markdown code fences — strip them
+    clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+
     try:
-        scores = json.loads(message.content[0].text.strip())
+        scores = json.loads(clean)
     except (json.JSONDecodeError, ValueError):
-        log.warning("Claude returned non-JSON scoring response; jobs returned unscored.")
+        log.warning("Gemini returned non-JSON scoring response; jobs returned unscored.")
         return jobs
 
     score_map = {s["job_index"]: s for s in scores if isinstance(s, dict)}

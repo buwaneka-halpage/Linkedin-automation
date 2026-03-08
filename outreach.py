@@ -2,7 +2,7 @@
 Module 3: Automated LinkedIn connection outreach.
 
 Searches for professionals matching configured criteria, generates a
-personalised connection note via Claude, then sends the request via the
+personalised connection note via Gemini, then sends the request via the
 Voyager API (linkedin-api package). Rate-limited to OUTREACH_DAILY_LIMIT
 requests per day (default: 5) to avoid triggering LinkedIn's bot detection.
 
@@ -27,7 +27,7 @@ import logging
 import os
 from datetime import date
 
-from anthropic import Anthropic
+import llm
 from dotenv import load_dotenv
 
 import voyager as v
@@ -84,30 +84,20 @@ def _already_sent(data: dict) -> set:
 # ---------------------------------------------------------------------------
 
 def _generate_note(first_name: str, headline: str) -> str:
-    """Ask Claude to write a personalised connection request (≤300 chars)."""
-    client = Anthropic()
-    message = client.messages.create(
-        model="claude-opus-4-6",
+    """Ask Gemini to write a personalised connection request (≤300 chars)."""
+    return llm.generate(
+        f"Write a LinkedIn connection request note.\n\n"
+        f"Recipient: {first_name} — {headline}\n"
+        f"Sender: {YOUR_ROLE} who wants to {OUTREACH_REASON}\n\n"
+        "Requirements:\n"
+        "- Maximum 300 characters (hard limit)\n"
+        "- Reference something specific from their headline\n"
+        "- Warm and genuine, not salesy\n"
+        "- First person, from the sender\n"
+        "- No emojis\n"
+        "- Return only the message text, nothing else.",
         max_tokens=150,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Write a LinkedIn connection request note.\n\n"
-                    f"Recipient: {first_name} — {headline}\n"
-                    f"Sender: {YOUR_ROLE} who wants to {OUTREACH_REASON}\n\n"
-                    "Requirements:\n"
-                    "- Maximum 300 characters (hard limit)\n"
-                    "- Reference something specific from their headline\n"
-                    "- Warm and genuine, not salesy\n"
-                    "- First person, from the sender\n"
-                    "- No emojis\n"
-                    "- Return only the message text, nothing else."
-                ),
-            }
-        ],
-    )
-    return message.content[0].text.strip()[:300]
+    )[:300]
 
 
 # ---------------------------------------------------------------------------
