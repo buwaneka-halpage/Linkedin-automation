@@ -11,18 +11,25 @@ Claude Desktop  (chat UI)
       |
       |  MCP protocol (JSON-RPC over stdio)
       v
-server.py             <- public interface, 7 MCP tools
+server.py                  <- public interface, 8 MCP tools
       |
-      |---> auth.py          <- OAuth 2.0 flow + token refresh
+      |---> auth.py             <- OAuth 2.0 flow + token refresh
       |          |
-      |---> linkedin_api.py  <- LinkedIn REST API wrappers
-                 |
-          token_store.py     <- read/write tokens.json
-                 |
-           config.py         <- loads .env
+      |---> linkedin_api.py     <- routes requests to right backend
+      |          |
+      |          |---> httpx (official REST API) -- for posting
+      |          |---> voyager.py               -- for reading + jobs
+      |          |---> posts_store.py            -- local fallback
+      |
+      token_store.py        <- read/write tokens.json (OAuth)
+      config.py             <- loads .env
 ```
 
-**The rule:** each layer only talks to the layer below it. `server.py` never touches `tokens.json` directly — it goes through `linkedin_api.py` → `auth.py` → `token_store.py`.
+**Two authentication tracks run in parallel:**
+- **OAuth 2.0** (Client ID + Secret) — used by `auth.py` for creating posts and fetching profile
+- **Voyager API** (Email + Password) — used by `voyager.py` for reading posts and searching jobs
+
+LinkedIn removed the `r_member_social` (read posts) scope from the free OAuth tier, which is why two separate auth methods are needed.
 
 ---
 
@@ -38,7 +45,7 @@ Loads `CLIENT_ID`, `CLIENT_SECRET`, `REDIRECT_PORT` from `.env` using `python-do
 
 ---
 
-### `token_store.py` — Persisting Login State
+### `token_store.py` — Persisting OAuth Login State
 
 Four functions:
 - `save_tokens(tokens)` — writes `tokens.json`
@@ -46,9 +53,22 @@ Four functions:
 - `tokens_valid()` — returns `True` if access token is not expired
 - `token_status()` — human-readable dict for the `linkedin_token_status` tool
 
-**Why it exists:** OAuth access tokens expire (~60 days for LinkedIn). If we stored them only in memory, you would need to re-authenticate every time Claude Desktop restarted. A JSON file keeps the session alive across restarts.
+**Why it exists:** OAuth access tokens expire (~60 days for LinkedIn). If we stored them only in memory, you would need to re-authenticate every time Claude Desktop restarted.
 
 **Key concept — token expiry:** every OAuth token has an `expires_in` field (seconds from now). We store `expires_at = time.time() + expires_in` — an absolute Unix timestamp — so we can check `time.time() < expires_at` later without doing time arithmetic.
+
+---
+
+### `posts_store.py` — Local Post History
+
+Three functions:
+- `save_post(post)` — prepends a post record to `posts.json` (newest first)
+- `load_posts(count)` — returns the most recent N posts
+- `post_count()` — total posts saved
+
+**Why it exists:** LinkedIn removed `r_member_social` scope from the free OAuth tier, so the official API cannot read posts back. Every post created via `create_text_post()` or `create_article_post()` is saved here as a fallback when Voyager credentials are not available.
+
+**Key concept — write-ahead log pattern:** saving data locally at write time (when you know all the details) is a common pattern for systems that can't read back what they wrote. Databases use the same idea with WAL (Write-Ahead Log) for crash recovery.
 
 ---
 
@@ -94,58 +114,81 @@ Your app                   Browser (you)              LinkedIn
 4. Polls `_auth_result` every 200ms for up to 5 minutes
 5. Validates state, exchanges code for tokens, saves to disk
 
-**`get_valid_token()`** — called before every API request. If the token expires within 5 minutes, it silently calls `refresh_access_token()`. This is why you never re-authenticate after the first time.
+**`get_valid_token()`** — called before every official API request. If the token expires within 5 minutes, it silently calls `refresh_access_token()`.
 
 ---
 
-### `linkedin_api.py` — Talking to LinkedIn
+### `voyager.py` — The Unofficial Voyager API
 
-All functions follow this pattern:
+LinkedIn's website and mobile app use an internal API called **Voyager** (`/voyager/api/...`). Unlike the official OAuth API, the Voyager endpoints expose reading posts and searching jobs without special permissions.
 
+The `linkedin-api` package (by Tom Quirk) authenticates to Voyager by logging in with **username and password**, mimicking LinkedIn's Android app headers. Cookies are cached to `~/.linkedin_api/cookies/` after the first login, so subsequent calls are fast.
+
+#### Key design decisions in `voyager.py`
+
+**`_get_client()` with a module-level cache:**
 ```python
-def some_api_call(...) -> dict:
-    resp = httpx.get/post(url, headers=_headers(), ...)
-    resp.raise_for_status()   # raises on 4xx/5xx
-    return resp.json()
+_client = None
+
+def _get_client():
+    global _client
+    if _client is not None:
+        return _client
+    _client = Linkedin(email, password)
+    return _client
 ```
 
-**`_headers()`** builds three required headers for every request:
-- `Authorization: Bearer {token}` — proves your identity
-- `X-Restli-Protocol-Version: 2.0.0` — LinkedIn's REST.li framework version (required)
-- `Content-Type: application/json` — signals a JSON body
+The `global _client` pattern caches the `Linkedin` instance for the lifetime of the MCP server process. Creating a new `Linkedin` instance (which logs in) on every tool call would be slow and might trigger LinkedIn's bot detection.
 
-#### Creating a post — the ugcPosts payload
+**`get_my_posts(count)`:**
+1. Calls `api.get_user_profile()` to get the logged-in user's `publicIdentifier` (their profile URL slug)
+2. Calls `api.get_profile_posts(public_id=..., post_count=count)` which hits `/voyager/api/identity/profileUpdatesV2`
+3. Parses the raw Voyager response to extract text, URN, engagement counts
 
-```python
-{
-    "author": "urn:li:person:ABC123",
-    "lifecycleState": "PUBLISHED",
-    "specificContent": {
-        "com.linkedin.ugc.ShareContent": {   # fully-qualified Java class name
-            "shareCommentary": {"text": "..."},
-            "shareMediaCategory": "NONE",
-        }
-    },
-    "visibility": {
-        "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
-    }
-}
+**`search_jobs(keywords, ...)`:**
+Calls `api.search_jobs(keywords=..., location_name=..., ...)` which hits the internal job search Voyager endpoint. Returns structured results (title, company, location, URL) instead of just a search URL.
+
+**Rate limiting:** `linkedin-api` automatically sleeps `random.randint(2, 5)` seconds between requests to avoid triggering bot detection.
+
+> **Note:** Voyager is not an official API. It may break if LinkedIn changes their internal endpoints. Use it responsibly.
+
+---
+
+### `linkedin_api.py` — The Router
+
+This file acts as a **router** — it decides which backend to use for each operation and presents a single consistent interface to `server.py`.
+
+```
+create_text_post()    -> official OAuth API (POST /v2/ugcPosts)
+                         + saves to posts_store
+
+create_article_post() -> official OAuth API (POST /v2/ugcPosts)
+                         + saves to posts_store
+
+get_profile()         -> official OAuth API (GET /v2/userinfo)
+
+get_my_posts()        -> voyager.get_my_posts()
+                         fallback: posts_store.load_posts()
+
+search_jobs()         -> voyager.search_jobs()
+                         fallback: build_job_search_url()
+
+build_job_search_url() -> pure URL construction, no API call
 ```
 
-The `com.linkedin.ugc.ShareContent` key is a fully-qualified Java class name from LinkedIn's internal type system, exposed through their REST.li framework. You use it exactly as-is.
-
-#### Reading posts — `GET /v2/ugcPosts`
-
+The fallback pattern in `get_my_posts` and `search_jobs`:
 ```python
-params = {
-    "q": "authors",             # which index to query
-    "authors": "List(urn:...)", # REST.li typed list syntax
-    "count": 10,
-    "sortBy": "LAST_MODIFIED",
-}
+try:
+    import voyager
+    return voyager.get_my_posts(count)
+except RuntimeError as e:
+    if "LINKEDIN_EMAIL" in str(e):
+        # credentials not set — degrade gracefully
+        return local_fallback()
+    raise  # re-raise unexpected errors
 ```
 
-The `List(...)` syntax is REST.li's way of encoding a typed list as a query parameter — it is not standard URL encoding.
+This means the tool still works without Voyager credentials — it just returns less data.
 
 ---
 
@@ -194,11 +237,52 @@ linkedin_api.create_text_post("Hello LinkedIn!", "PUBLIC")
   |-> _get_person_urn() -> read from tokens.json (cached)
   |-> POST https://api.linkedin.com/v2/ugcPosts
   |-> read post_id from x-restli-id response header
+  |-> posts_store.save_post(result) -> write to posts.json
   v
 return {"post_id": "...", "post_url": "https://www.linkedin.com/feed/update/..."}
   |
   v
 Claude Desktop displays the post URL
+```
+
+---
+
+## Data Flow: Reading Your Posts (Voyager)
+
+```
+Claude Desktop calls linkedin_get_my_posts(count=10)
+  |
+  v
+server.py -> linkedin_api.get_my_posts(10)
+  |
+  v
+linkedin_api: try voyager.get_my_posts(10)
+  |
+  v
+voyager._get_client()
+  |-> check if _client is cached
+  |-> if not: Linkedin(email, password)
+  |     -> POST https://www.linkedin.com/uas/authenticate  (mimics Android app)
+  |     -> cache cookies to ~/.linkedin_api/cookies/
+  |-> return cached _client
+  |
+  v
+api.get_user_profile()  -> GET /voyager/api/me
+  extract publicIdentifier (e.g. "buwaneka-halpage")
+  |
+  v
+api.get_profile_posts(public_id="buwaneka-halpage", post_count=10)
+  -> GET /voyager/api/identity/profileUpdatesV2?q=memberShareFeed&...
+  -> sleeps 2-5s between paginated requests
+  |
+  v
+parse each element: extract text, URN, likes, comments, shares
+  |
+  v
+return {profile, returned, posts[]}
+  |
+  v
+Claude Desktop displays posts with engagement stats
 ```
 
 ---
@@ -243,17 +327,19 @@ Claude Desktop: "Authenticated successfully as Buwaneka Halpage."
 |---------|-------|--------------|
 | `threading.Thread(daemon=True)` | `auth.py` | Callback server runs in background; dies when main process exits |
 | `@decorator` syntax | `server.py` | `@mcp.tool()` registers functions without modifying their code |
-| `dict \| None` type hint | `token_store.py` | Union type — returns a dict or None |
+| `dict \| None` type hint | `token_store.py` | Union type — returns a dict or Nothing |
 | `{**a, **b}` dict unpacking | `auth.py` | Merges two dicts; right-side keys win on conflict |
 | `resp.raise_for_status()` | `linkedin_api.py` | Throws immediately on HTTP 4xx/5xx; prevents silent failures |
 | `time.time()` | `token_store.py` | Unix timestamp (seconds since 1970); comparable across restarts |
+| `global _client` + lazy init | `voyager.py` | Module-level cache — creates expensive object once, reuses it |
+| `try/except RuntimeError` | `linkedin_api.py` | Graceful degradation — falls back to simpler path if credentials missing |
 
 ---
 
 ## Common Extension Points
 
 **Add a new LinkedIn API tool:**
-1. Write a function in `linkedin_api.py` that calls the endpoint
+1. Write a function in `linkedin_api.py` routing to the right backend (official API or voyager)
 2. Add a `@mcp.tool()` wrapper in `server.py` with a clear docstring
 3. Restart Claude Desktop — FastMCP registers it automatically
 
@@ -264,3 +350,6 @@ Only `token_store.py` needs to change. The four function signatures stay the sam
 1. Add the scope string to `SCOPES` in `config.py`
 2. Enable the corresponding LinkedIn product in the Developer Portal
 3. Delete `tokens.json` and re-run `linkedin_authenticate` — the user will consent to the new scope
+
+**Add more Voyager features:**
+`voyager.py` is the right place. The `linkedin-api` package also exposes: `get_feed_posts()`, `get_post_comments()`, `react_to_post()`, `send_message()`, `add_connection()`, `search_people()`. Add a wrapper function in `voyager.py`, route it in `linkedin_api.py`, expose it as a tool in `server.py`.
