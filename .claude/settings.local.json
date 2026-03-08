@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs",
+      "Bash(uv --version)",
+      "Bash(py --version)",
+      "Bash(pip --version)",
+      "Bash(pip3 --version)",
+      "Bash(py -3 --version)",
+      "Bash(py -3 -m pip --version)",
+      "Bash(py -3 -m pip install uv --quiet)",
+      "Bash(py -3 -m uv --version)",
+      "Bash(py -3 -m uv add mcp httpx python-dotenv)",
+      "mcp__mcp-registry__search_mcp_registry",
+      "Bash(export PATH=\"$PATH:/c/Program Files/GitHub CLI/\")",
+      "Bash(gh auth status)",
+      "Bash(gh repo create \"Linkedin-automation\" --public --description \"LinkedIn MCP server for Claude Desktop — post generation and job research via OAuth 2.0\")",
+      "Bash(.venv/Scripts/python.exe -c \":*)",
+      "Skill(commit-commands:commit-push-pr)",
+      "Skill(commit-commands:commit-push-pr:*)",
+      "Bash(timeout 5 .venv/Scripts/python.exe server.py)"
+    ]
+  }
+}
