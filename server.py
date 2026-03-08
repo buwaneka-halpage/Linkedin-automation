@@ -7,8 +7,9 @@ Tools exposed:
   - linkedin_get_profile         : Fetch your LinkedIn profile
   - linkedin_create_post         : Publish a text post
   - linkedin_create_article_post : Publish a post with article/URL preview
-  - linkedin_get_my_posts        : Retrieve your own posts
-  - linkedin_job_search_url      : Build a job search URL with filters
+  - linkedin_get_my_posts        : Retrieve your own posts (Voyager API)
+  - linkedin_search_jobs         : Search jobs with real results (Voyager API)
+  - linkedin_job_search_url      : Build a job search URL (no credentials needed)
 
 Run with:
   uv run server.py
@@ -168,23 +169,20 @@ def linkedin_create_article_post(
 @mcp.tool()
 def linkedin_get_my_posts(count: int = 10) -> dict:
     """
-    Retrieve your own LinkedIn posts — text, articles, and their metadata.
+    Retrieve your own LinkedIn posts with engagement stats (likes, comments, shares).
+
+    Uses LinkedIn's Voyager API (requires LINKEDIN_EMAIL + LINKEDIN_PASSWORD in .env).
+    Falls back to the local post history (posts.json) if credentials are not set.
 
     Args:
-        count: How many posts to return (1–50, default 10).
+        count: How many posts to return (1–100, default 10).
 
     Returns:
-        total      — total posts on record
-        returned   — number in this response
+        profile    — your LinkedIn public ID
+        returned   — number of posts in this response
         posts[]    — list of posts, each with:
-                       post_id, post_url, text (first 300 chars),
-                       type (NONE=text / ARTICLE), article_url,
-                       created (UTC timestamp), visibility, state
-
-    Note:
-        Requires r_member_social scope. If you see a scope error,
-        go to developer.linkedin.com and add the 'Share on LinkedIn'
-        product to your app, then re-authenticate.
+                       urn, post_url, text (first 500 chars),
+                       age (e.g. "2 mo"), likes, comments, shares
     """
     try:
         return linkedin_api.get_my_posts(count)
@@ -193,8 +191,50 @@ def linkedin_get_my_posts(count: int = 10) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Job research
+# Job search
 # ---------------------------------------------------------------------------
+
+@mcp.tool()
+def linkedin_search_jobs(
+    keywords: str,
+    location: str = "",
+    remote: bool = False,
+    job_type: str = "",
+    experience: str = "",
+    count: int = 10,
+) -> dict:
+    """
+    Search LinkedIn jobs and return structured results — titles, companies, locations, and links.
+
+    Uses LinkedIn's Voyager API (requires LINKEDIN_EMAIL + LINKEDIN_PASSWORD in .env).
+    Falls back to a filtered search URL if credentials are not set.
+
+    Args:
+        keywords:   Role title or skills, e.g. "Senior Python Engineer AI".
+        location:   City or country, e.g. "London, United Kingdom". Leave blank for worldwide.
+        remote:     True to filter for remote-only roles.
+        job_type:   One of: FULL_TIME, PART_TIME, CONTRACT, TEMPORARY, INTERNSHIP.
+        experience: Seniority level: "1" internship, "2" entry, "3" associate,
+                    "4" mid-senior, "5" director, "6" executive.
+        count:      Number of results to return (1–50, default 10).
+
+    Returns:
+        keywords, location, returned, jobs[] — each with job_id, title,
+        company, location, job_url, applies count.
+    """
+    if not keywords:
+        return {"error": "keywords is required."}
+    try:
+        return linkedin_api.search_jobs(
+            keywords=keywords,
+            location=location,
+            remote=remote,
+            job_type=job_type,
+            experience=experience,
+            count=count,
+        )
+    except Exception as e:
+        return {"error": str(e)}
 
 @mcp.tool()
 def linkedin_job_search_url(

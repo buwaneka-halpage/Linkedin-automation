@@ -183,22 +183,54 @@ def create_article_post(
 
 def get_my_posts(count: int = 10) -> dict:
     """
-    Retrieve posts created through this tool from local store (posts.json).
-
-    LinkedIn's consumer API does not provide r_member_social scope, so posts
-    are tracked locally on creation. Posts made outside this tool (LinkedIn
-    web, mobile) are not included.
+    Retrieve the authenticated user's own LinkedIn posts via Voyager API.
+    Falls back to the local posts.json store if Voyager credentials are missing.
 
     Args:
-        count: Number of posts to return (1–50).
+        count: Number of posts to return (1–100).
     """
-    posts = posts_store.load_posts(min(max(count, 1), 50))
-    return {
-        "total": posts_store.post_count(),
-        "returned": len(posts),
-        "source": "local store (posts.json)",
-        "posts": posts,
-    }
+    try:
+        import voyager
+        return voyager.get_my_posts(count)
+    except RuntimeError as e:
+        # Voyager credentials not configured — fall back to local store
+        if "LINKEDIN_EMAIL" in str(e):
+            posts = posts_store.load_posts(min(max(count, 1), 50))
+            return {
+                "total": posts_store.post_count(),
+                "returned": len(posts),
+                "source": "local store (add LINKEDIN_EMAIL + LINKEDIN_PASSWORD to .env for live fetch)",
+                "posts": posts,
+            }
+        raise
+
+
+def search_jobs(
+    keywords: str,
+    location: str = "",
+    remote: bool = False,
+    job_type: str = "",
+    experience: str = "",
+    count: int = 10,
+) -> dict:
+    """
+    Search LinkedIn jobs and return structured results via Voyager API.
+    Falls back to a search URL if Voyager credentials are missing.
+    """
+    try:
+        import voyager
+        return voyager.search_jobs(
+            keywords=keywords,
+            location=location,
+            remote=remote,
+            job_type=job_type,
+            experience=experience,
+            count=count,
+        )
+    except RuntimeError as e:
+        if "LINKEDIN_EMAIL" in str(e):
+            return build_job_search_url(keywords, location, remote, job_type)
+        raise
 
 
 # ---------------------------------------------------------------------------
